@@ -31,6 +31,9 @@ RTM_READ_DELAY = 1 # 1 second delay between reading from RTM
 EXAMPLE_COMMAND = "do"
 MENTION_REGEX = "^<@(|[WU].+?)>(.*)"
 MAGIC_WORDS_REGEX = "(PR|DSPR|DS)[ ]?[-#]?([0-9]+)"
+GET_PR_REGEX = "(PR|DSPR)[ ]?[-#]?([0-9]+)(.*)"
+GET_JIRA_ISSUE_REGEX = "(DS)[ ]?[-#]?([0-9]+)(.*)"
+GET_COMMIT_REGEX = "(commit) ([abcdef0-9]{6,40})(.*)"
 COMMIT_SHA_REGEX = "commit ([abcdef0-9]{6})"
 SEARCH_REVIEWS_REGEX = "(quick win)[^0-9]*([0-9]\.[0-9])(.*)$"
 SEARCH_SORT_REGEX = "by (date|updated|recent|created|interaction|id)"
@@ -97,6 +100,18 @@ def parse_magic_phrases(message_text):
         {'name': 'quick_win',
          'regex': SEARCH_REVIEWS_REGEX,
          'groups': ['text', 'command', 'milestone', 'optional']
+         },
+        {'name': 'get_pr',
+         'regex': GET_PR_REGEX,
+         'groups': ['text', 'command', 'number', 'optional']
+         },
+        {'name': 'get_jira_issue',
+         'regex': GET_JIRA_ISSUE_REGEX,
+         'groups': ['text', 'command', 'number', 'optional']
+         },
+        {'name': 'get_commit',
+         'regex': GET_COMMIT_REGEX,
+         'groups': ['text', 'command', 'sha', 'optional']
          }
     ]
 
@@ -105,12 +120,21 @@ def parse_magic_phrases(message_text):
         if matches: # and len(matches.groups()) == len(c['groups']):
             print "Found match for %s" % c['name']
             for index, group in enumerate(c['groups']):
-                command_data[group] = matches.group(index)
+                # i could enumerate actual matches groups instead... either way have to handle index mismatches
+                # unless i make c[groups] a dict like {0:'text,1:'command', .... } ?
+                try:
+                    command_data[group] = matches.group(index)
+                except IndexError:
+                    print "Encountered an index error for %s, group: %s, index: %s" % (c['name'], group, index)
+                    # TODO log.error()
+                    return None
+
             command_data['name'] = c['name']
             for k, v in command_data.items():
                 print "%s = %s" % (k, v)
+            return command_data if command_data else None
+    return None
 
-    return command_data
 
 def parse_magic_words(message_text):
     """
@@ -173,6 +197,7 @@ def handle_command(command, data, channel):
 
     # Finds and executes the given command, filling in response
     response = None
+
     # This is where you start to implement more commands!
     if command.startswith(EXAMPLE_COMMAND):
         response = "Sure...write some more code then I can do that!"
@@ -186,6 +211,16 @@ def handle_command(command, data, channel):
 
     if (command == "sha"):
         response = fetch_commit(data)
+
+    if command == "get_jira_issue":
+        response = fetch_jiraissue(data['number'])
+
+    if command == "get_pr":
+        # no optional handling, i don't think? could do verbosity though
+        response = fetch_pullrequest(data['number'])
+
+    if command == "get_commit":
+        response = fetch_commit(data['sha'])
 
     if command == "quick_win":
         # test sorting since this is a search
@@ -242,7 +277,9 @@ def fetch_jiraissue(data):
                 #print remote_link.object.summary
                 print remote_link.object.status
             """
-            pulls = search_pulls_for_issue(label)
+            # TODO: this should perhaps be a title search in regular search to avoid bad matches
+            # -- it's a tradeoff as not all PRs are named nicely with DS-1234 keys
+            pulls = search_pulls_for_issue("\""+label+"\"")
 
             #print issue.summary
             issue_type = issue.fields.issuetype or "Issue"
@@ -305,7 +342,7 @@ def fetch_commit(sha):
     c = repo.get_commit(sha)
     if c and hasattr(c,'files'):
         files = list(map(lambda x: ("%s `+%i` `-%i` `(%i)`" % (x.filename,x.additions,x.deletions,x.changes)), c.files))
-        response = ("Commit %s by %s on %s `+%i` `-%i` `(%i)`\n```%s```" % (sha,c.commit.author.name,c.commit.author.date,
+        response = ("Commit %s by %s on %s `+%i` `-%i` `(%i)`\n```%s```" % (sha[:6],c.commit.author.name,c.commit.author.date,
             c.stats.additions,c.stats.deletions,c.stats.total,c.commit.message))
         response += ("\n%s\n%i files changed" % (c.html_url,len(files)))
         if len(files) <=3 and len(files) > 0:
