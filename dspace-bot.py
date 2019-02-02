@@ -10,6 +10,7 @@ from github import Github
 import github
 from jira import JIRA
 
+logging.basicConfig()
 log = logging.getLogger()
 
 # instantiate Github client
@@ -31,6 +32,8 @@ EXAMPLE_COMMAND = "do"
 MENTION_REGEX = "^<@(|[WU].+?)>(.*)"
 MAGIC_WORDS_REGEX = "(PR|DSPR|DS)[ ]?[-#]?([0-9]+)"
 COMMIT_SHA_REGEX = "commit ([abcdef0-9]{6})"
+SEARCH_REVIEWS_REGEX = "(quick win)[^0-9]*([0-9]\.[0-9])(.*)$"
+SEARCH_SORT_REGEX = "by (date|updated|recent|created|interaction|id)"
 DSPACE_DSPACE = 3743376 # internal ID of dspace/dspace repository
 
 magic_words_cooldown = {}
@@ -72,6 +75,16 @@ def parse_bot_commands(slack_events):
                 return message, user_id, event["channel"]
     return None, None, None
 
+def parse_magic_phrases(message_text):
+    quick_wins = re.search(SEARCH_REVIEWS_REGEX, message_text, re.IGNORECASE)
+    if quick_wins:
+        print ("Found some quick wins: reference = %s, number = %s" % (quick_wins.group(1), quick_wins.group(2)))
+        # now, quickly iterate cooldown dict and wipe things that elapsed more than 60 seconds ago
+        for k, v in magic_words_cooldown.items():
+            # if more than 60 seconds have passed, wipe it
+            if time.time() - v > 60:
+                del magic_words_cooldown[k]
+    return (quick_wins.group(1), quick_wins.group(2).strip(), quick_wins.group(3).strip()) if quick_wins else (None, None)
 
 def parse_magic_words(message_text):
     """
@@ -81,6 +94,8 @@ def parse_magic_words(message_text):
     """
     matches = re.search(MAGIC_WORDS_REGEX, message_text, re.IGNORECASE)
     commits = re.search(COMMIT_SHA_REGEX, message_text, re.IGNORECASE)
+    quick_wins = re.search(SEARCH_REVIEWS_REGEX, message_text, re.IGNORECASE)
+
     if matches:
         print ("Found some magic words: reference = %s, number = %s" % (matches.group(1), matches.group(2)))
         # now, quickly iterate cooldown dict and wipe things that elapsed more than 60 seconds ago
@@ -90,7 +105,15 @@ def parse_magic_words(message_text):
                  del magic_words_cooldown[k]
         return (matches.group(1), matches.group(2).strip()) if matches else (None, None)
     elif commits:
-        return ("sha",commits.group(1).strip())
+        return "sha",commits.group(1).strip()
+    elif quick_wins:
+        print ("Found some quick wins: reference = %s, number = %s" % (quick_wins.group(1), quick_wins.group(2)))
+        # now, quickly iterate cooldown dict and wipe things that elapsed more than 60 seconds ago
+        for k, v in magic_words_cooldown.items():
+            # if more than 60 seconds have passed, wipe it
+            if time.time() - v > 60:
+                del magic_words_cooldown[k]
+        return (quick_wins.group(1), quick_wins.group(2).strip()) if quick_wins else (None, None)
 
     return (matches.group(1), matches.group(2).strip()) if matches else (None, None)
 
@@ -136,6 +159,18 @@ def handle_command(command, data, channel):
 
     if (command == "sha"):
         response = fetch_commit(data)
+
+    if command == "quick win":
+        # test sorting since this is a search
+        default_sort = "best match"
+        sort_matches = re.search(SEARCH_SORT_REGEX, data, re.IGNORECASE)
+        query = "repo:DSpace/DSpace is:open label:\"quick win\" milestone:"+data
+        if (sort_matches):
+            query += " sort:"+sort_matches.group(2).strip()
+
+        response = "*Top 5 quick wins for %s sorted by interaction* " \
+                   "(say \"by created\" or \"by updated\" for recent PRs)\n\n" % data
+        response += search_pulls_simple(query)
     # Sends the response back to the channel
     #slack_client.api_call(
     #    "chat.postMessage",
@@ -254,6 +289,55 @@ def fetch_commit(sha):
 
     return None
 
+def search_pulls_simple(query):
+    """
+    Search a repo's PRs with the query supplied, base function so we can do these things:
+    https://help.github.com/articles/searching-issues-and-pull-requests/
+    :param query: a valid github search query
+    :return: Formatted response to be sent to the channel
+    """
+    index = 0
+    response = ""
+    try:
+        issues = github_client.search_issues(query)
+        if issues:
+            for issue in issues:
+                index += 1
+                if index > 5:
+                    return response
+                pr = issue.as_pull_request()
+                reviews = pr.get_reviews()
+                approvals = 0
+                change_requests = 0
+                total_comments = 0
+                for review in reviews:
+                    total_comments += 1
+                    if review.state == "APPROVED":
+                        approvals += 1
+                    elif review.state == "CHANGES_REQUESTED":
+                        change_requests += 1
+                mergeable = ""
+                if pr.mergeable_state == 'clean':
+                    if approvals >= 2:
+                        mergeable = "can be merged (+%s)" % approvals
+                    elif approvals == 1:
+                        mergeable = "needs another +1"
+                    else:
+                        mergeable = "needs >= 2 approvals"
+                else:
+                    if change_requests > 0:
+                        mergeable = "blocked, changes requested"
+                    else:
+                        mergeable = "blocked (CI or merge conflict?)"
+
+                review_state = ("%s review comments. %s approvals, %s changes requested. State: %s" % (total_comments, approvals, change_requests, mergeable))
+                response += (":github: *#%s* %s\n%s\nhttps://github.com/DSpace/DSpace/pull/%s (Updated: %s)\n\n" % (issue.number, issue.title, review_state, issue.number, pr.updated_at))
+        return response
+    except github.UnknownObjectException:
+        traceback.print_exc()
+        response = ("Could not find a DSpace pull request with this search")
+        return response
+
 
 def search_pulls_for_issue(data):
     """
@@ -309,6 +393,7 @@ if __name__ == "__main__":
         #print(fetch_pullrequest(2048))
         #print(fetch_jiraissue(3734))
         #print(fetch_commit('6d1b695'))
+        print(search_pulls_simple("repo:DSpace/DSpace is:open label:\"quick win\" milestone:6.4 sort:interaction"))
 
         # Read bot's user ID by calling Web API method `auth.test`
         dspace_bot_id = slack_client.api_call("auth.test")["user_id"]
