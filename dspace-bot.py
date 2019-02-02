@@ -56,6 +56,19 @@ def cooling_down(label):
 
     return False
 
+def parse_slack_events(slack_events):
+    """
+        Parses a list of events coming from the Slack RTM API to find bot commands.
+        If a bot command is found, this function returns a tuple of command and channel.
+        If its not found, then this function returns None, None.
+    """
+    for event in slack_events:
+        if event["type"] == "message" and not "subtype" in event:
+            command_data = parse_magic_phrases(event["text"])
+            if command_data is not None:
+                command_data['channel'] = event['channel']
+                return command_data
+    return None
 
 def parse_bot_commands(slack_events):
     """
@@ -77,14 +90,27 @@ def parse_bot_commands(slack_events):
 
 def parse_magic_phrases(message_text):
     quick_wins = re.search(SEARCH_REVIEWS_REGEX, message_text, re.IGNORECASE)
-    if quick_wins:
-        print ("Found some quick wins: reference = %s, number = %s" % (quick_wins.group(1), quick_wins.group(2)))
-        # now, quickly iterate cooldown dict and wipe things that elapsed more than 60 seconds ago
-        for k, v in magic_words_cooldown.items():
-            # if more than 60 seconds have passed, wipe it
-            if time.time() - v > 60:
-                del magic_words_cooldown[k]
-    return (quick_wins.group(1), quick_wins.group(2).strip(), quick_wins.group(3).strip()) if quick_wins else (None, None)
+    #categories = {'quick_wins':SEARCH_REVIEWS_REGEX,'issues':MAGIC_WORDS_REGEX}
+    command_data = {}
+
+    categories = [
+        {'name': 'quick_win',
+         'regex': SEARCH_REVIEWS_REGEX,
+         'groups': ['text', 'command', 'milestone', 'optional']
+         }
+    ]
+
+    for c in categories:
+        matches = re.search(c['regex'], message_text, re.IGNORECASE)
+        if matches: # and len(matches.groups()) == len(c['groups']):
+            print "Found match for %s" % c['name']
+            for index, group in enumerate(c['groups']):
+                command_data[group] = matches.group(index)
+            command_data['name'] = c['name']
+            for k, v in command_data.items():
+                print "%s = %s" % (k, v)
+
+    return command_data
 
 def parse_magic_words(message_text):
     """
@@ -106,7 +132,7 @@ def parse_magic_words(message_text):
         return (matches.group(1), matches.group(2).strip()) if matches else (None, None)
     elif commits:
         return "sha",commits.group(1).strip()
-    elif quick_wins:
+    elif quick_wins and False:
         print ("Found some quick wins: reference = %s, number = %s" % (quick_wins.group(1), quick_wins.group(2)))
         # now, quickly iterate cooldown dict and wipe things that elapsed more than 60 seconds ago
         for k, v in magic_words_cooldown.items():
@@ -140,6 +166,7 @@ def handle_command(command, data, channel):
     """
         Executes bot command if the command is known
     """
+    print "handle_command called with %s for %s" % (command, channel)
     # Default response is help text for the user
     #default_response = "Not sure what you mean. Try *{}*.".format(EXAMPLE_COMMAND)
     default_response = None
@@ -160,16 +187,16 @@ def handle_command(command, data, channel):
     if (command == "sha"):
         response = fetch_commit(data)
 
-    if command == "quick win":
+    if command == "quick_win":
         # test sorting since this is a search
         default_sort = "best match"
-        sort_matches = re.search(SEARCH_SORT_REGEX, data, re.IGNORECASE)
-        query = "repo:DSpace/DSpace is:open label:\"quick win\" milestone:"+data
+        sort_matches = re.search(SEARCH_SORT_REGEX, data['optional'], re.IGNORECASE)
+        query = "repo:DSpace/DSpace is:open label:\"quick win\" milestone:"+data['milestone']
         if (sort_matches):
             query += " sort:"+sort_matches.group(2).strip()
 
         response = "*Top 5 quick wins for %s sorted by interaction* " \
-                   "(say \"by created\" or \"by updated\" for recent PRs)\n\n" % data
+                   "(say \"by created\" or \"by updated\" for recent PRs)\n\n" % data['milestone']
         response += search_pulls_simple(query)
     # Sends the response back to the channel
     #slack_client.api_call(
@@ -398,9 +425,13 @@ if __name__ == "__main__":
         # Read bot's user ID by calling Web API method `auth.test`
         dspace_bot_id = slack_client.api_call("auth.test")["user_id"]
         while True:
-            command, data, channel = parse_bot_commands(slack_client.rtm_read())
-            if command:
-                handle_command(command, data, channel)
+            #command, data, channel = parse_bot_commands(slack_client.rtm_read())
+            magic_phrase = parse_slack_events(slack_client.rtm_read())
+            if magic_phrase:
+                print "Got a magic phrase: %s" % magic_phrase['name']
+                handle_command(magic_phrase['name'], magic_phrase, magic_phrase['channel'])
+            #if command:
+            #    handle_command(command, data, channel)
             time.sleep(RTM_READ_DELAY)
     else:
         print("Connection failed. Exception traceback printed above.")
