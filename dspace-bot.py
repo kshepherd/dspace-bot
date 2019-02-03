@@ -28,16 +28,12 @@ dspace_bot_id = None
 
 # constants
 RTM_READ_DELAY = 1 # 1 second delay between reading from RTM
-EXAMPLE_COMMAND = "do"
 MENTION_REGEX = "^<@(|[WU].+?)>(.*)"
-MAGIC_WORDS_REGEX = "(PR|DSPR|DS)[ ]?[-#]?([0-9]+)"
 GET_PR_REGEX = "(PR|DSPR)[ ]?[-#]?([0-9]+)(.*)"
 GET_JIRA_ISSUE_REGEX = "(DS)[ ]?[-#]?([0-9]+)(.*)"
 GET_COMMIT_REGEX = "(commit) ([abcdef0-9]{6,40})(.*)"
-COMMIT_SHA_REGEX = "commit ([abcdef0-9]{6})"
 SEARCH_REVIEWS_REGEX = "(quick win)[^0-9]*([0-9]\.[0-9])(.*)$"
-SEARCH_SORT_REGEX = "by (date|updated|recent|created|interaction|id)"
-DSPACE_DSPACE = 3743376 # internal ID of dspace/dspace repository
+SEARCH_SORT_REGEX = "by (updated|recent|created|interaction|best match|number|id)"
 
 magic_words_cooldown = {}
 
@@ -48,7 +44,7 @@ def cooling_down(label):
     :param label: the label/command eg 'DS-1234'
     :return: boolean representing "is in cooldown"
     """
-    if (label) in magic_words_cooldown:
+    if label in magic_words_cooldown:
         elapsed = time.time() - magic_words_cooldown[label]
         print "Time elapsed since last time "+label+" was requested: "+str(elapsed)
         return True
@@ -57,7 +53,6 @@ def cooling_down(label):
         print "Response for "+label+" logged at "+magic_words_cooldown[label].__str__()
         return False
 
-    return False
 
 def parse_slack_events(slack_events):
     """
@@ -73,23 +68,6 @@ def parse_slack_events(slack_events):
                 return command_data
     return None
 
-def parse_bot_commands(slack_events):
-    """
-        Parses a list of events coming from the Slack RTM API to find bot commands.
-        If a bot command is found, this function returns a tuple of command and channel.
-        If its not found, then this function returns None, None.
-    """
-    for event in slack_events:
-        if event["type"] == "message" and not "subtype" in event:
-            user_id, message = parse_direct_mention(event["text"])
-            reference, number = parse_magic_words(event["text"])
-            # Mentions a magic word without direct mention necessary
-            if reference is not None and number is not None:
-                return reference, number, event["channel"]
-            # Direct message
-            if user_id == dspace_bot_id:
-                return message, user_id, event["channel"]
-    return None, None, None
 
 def parse_magic_phrases(message_text):
     quick_wins = re.search(SEARCH_REVIEWS_REGEX, message_text, re.IGNORECASE)
@@ -115,6 +93,16 @@ def parse_magic_phrases(message_text):
          }
     ]
 
+    # Mentions are a special case. We'll look for them first then decide what to do?
+    matches = re.search(MENTION_REGEX, message_text)
+    try:
+        if matches and matches.group(1) == dspace_bot_id:
+            # we could set flags here, for special mention-only commands etc
+            # but for now i will just set message text to the parts after the username
+            message_text = matches.group(2).strip()
+    except IndexError:
+        print "Hm, index error looking for user ID in mention, oh well, carrying on"
+
     for c in categories:
         matches = re.search(c['regex'], message_text, re.IGNORECASE)
         if matches: # and len(matches.groups()) == len(c['groups']):
@@ -136,47 +124,6 @@ def parse_magic_phrases(message_text):
     return None
 
 
-def parse_magic_words(message_text):
-    """
-        Finds message text that matches some 'magic words' containing references
-        to things like JIRA issues, Github PRs, commit hashes, code line numbers
-        and general commands that don't need a direct mention
-    """
-    matches = re.search(MAGIC_WORDS_REGEX, message_text, re.IGNORECASE)
-    commits = re.search(COMMIT_SHA_REGEX, message_text, re.IGNORECASE)
-    quick_wins = re.search(SEARCH_REVIEWS_REGEX, message_text, re.IGNORECASE)
-
-    if matches:
-        print ("Found some magic words: reference = %s, number = %s" % (matches.group(1), matches.group(2)))
-        # now, quickly iterate cooldown dict and wipe things that elapsed more than 60 seconds ago
-        for k, v in magic_words_cooldown.items():
-            # if more than 60 seconds have passed, wipe it
-             if time.time() - v > 60:
-                 del magic_words_cooldown[k]
-        return (matches.group(1), matches.group(2).strip()) if matches else (None, None)
-    elif commits:
-        return "sha",commits.group(1).strip()
-    elif quick_wins and False:
-        print ("Found some quick wins: reference = %s, number = %s" % (quick_wins.group(1), quick_wins.group(2)))
-        # now, quickly iterate cooldown dict and wipe things that elapsed more than 60 seconds ago
-        for k, v in magic_words_cooldown.items():
-            # if more than 60 seconds have passed, wipe it
-            if time.time() - v > 60:
-                del magic_words_cooldown[k]
-        return (quick_wins.group(1), quick_wins.group(2).strip()) if quick_wins else (None, None)
-
-    return (matches.group(1), matches.group(2).strip()) if matches else (None, None)
-
-
-def parse_direct_mention(message_text):
-    """
-        Finds a direct mention (a mention that is at the beginning) in message text
-        and returns the user ID which was mentioned. If there is no direct mention, returns None
-    """
-    matches = re.search(MENTION_REGEX, message_text)
-    return (matches.group(1), matches.group(2).strip()) if matches else (None, None)
-
-
 def send_response(message_text,channel):
     # Sends the response back to the channel
     slack_client.api_call(
@@ -191,26 +138,10 @@ def handle_command(command, data, channel):
         Executes bot command if the command is known
     """
     print "handle_command called with %s for %s" % (command, channel)
-    # Default response is help text for the user
-    #default_response = "Not sure what you mean. Try *{}*.".format(EXAMPLE_COMMAND)
     default_response = None
 
     # Finds and executes the given command, filling in response
     response = None
-
-    # This is where you start to implement more commands!
-    if command.startswith(EXAMPLE_COMMAND):
-        response = "Sure...write some more code then I can do that!"
-
-    # Github pull request info
-    if (command == "PR" or command == "DSPR") and data is not None:
-        response = fetch_pullrequest(data)
-
-    if (command == "DS") and data is not None:
-        response = fetch_jiraissue(data)
-
-    if (command == "sha"):
-        response = fetch_commit(data)
 
     if command == "get_jira_issue":
         response = fetch_jiraissue(data['number'])
@@ -224,21 +155,17 @@ def handle_command(command, data, channel):
 
     if command == "quick_win":
         # test sorting since this is a search
-        default_sort = "best match"
+        sort = "best match"
         sort_matches = re.search(SEARCH_SORT_REGEX, data['optional'], re.IGNORECASE)
         query = "repo:DSpace/DSpace is:open label:\"quick win\" milestone:"+data['milestone']
-        if (sort_matches):
-            query += " sort:"+sort_matches.group(2).strip()
+        if sort_matches and len(sort_matches.groups()) >= 2:
+            sort = sort_matches.group(2).strip()
+            query += " sort:"+sort
 
-        response = "*Top 5 quick wins for %s sorted by interaction* " \
-                   "(say \"by created\" or \"by updated\" for recent PRs)\n\n" % data['milestone']
+        response = "*Top 5 quick wins for %s sorted by %s* " \
+                   "(say \"by created\" or \"by updated\" for recent PRs)\n\n" % (data['milestone'], sort)
         response += search_pulls_simple(query)
-    # Sends the response back to the channel
-    #slack_client.api_call(
-    #    "chat.postMessage",
-    #    channel=channel,
-    #    text=response or default_response
-    #)
+
     send_response(response or default_response, channel)
 
 
@@ -324,12 +251,12 @@ def fetch_pullrequest(data):
     except github.UnknownObjectException:
         response = ("Could not find a DSpace pull request with number %i." % number)
         return response
-        """
+
     except Exception:
         print "Unexpected error:", sys.exc_info()[0]
         response = "Unexpected error:", sys.exc_info()[0]
         return response
-        """
+
 
 
 def fetch_commit(sha):
@@ -457,18 +384,18 @@ if __name__ == "__main__":
         #print(fetch_pullrequest(2048))
         #print(fetch_jiraissue(3734))
         #print(fetch_commit('6d1b695'))
-        print(search_pulls_simple("repo:DSpace/DSpace is:open label:\"quick win\" milestone:6.4 sort:interaction"))
+        #print(search_pulls_simple("repo:DSpace/DSpace is:open label:\"quick win\" milestone:6.4 sort:interaction"))
 
         # Read bot's user ID by calling Web API method `auth.test`
         dspace_bot_id = slack_client.api_call("auth.test")["user_id"]
+
+        print "user_id is %s" % dspace_bot_id
+
         while True:
-            #command, data, channel = parse_bot_commands(slack_client.rtm_read())
-            magic_phrase = parse_slack_events(slack_client.rtm_read())
-            if magic_phrase:
-                print "Got a magic phrase: %s" % magic_phrase['name']
-                handle_command(magic_phrase['name'], magic_phrase, magic_phrase['channel'])
-            #if command:
-            #    handle_command(command, data, channel)
+            parsed_command_data = parse_slack_events(slack_client.rtm_read())
+            if parsed_command_data:
+                print "Got a magic phrase: %s" % parsed_command_data['name']
+                handle_command(parsed_command_data['name'], parsed_command_data, parsed_command_data['channel'])
             time.sleep(RTM_READ_DELAY)
     else:
         print("Connection failed. Exception traceback printed above.")
